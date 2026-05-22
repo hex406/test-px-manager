@@ -7,6 +7,8 @@ Checks:
   3. os.splice() accepts offset_src (Python 3.10+, Linux 5.17+).
 """
 
+from __future__ import annotations
+
 import os
 import platform
 import socket
@@ -34,14 +36,36 @@ def check_kernel_version() -> tuple[bool, str]:
 
 
 def check_af_alg() -> tuple[bool, str]:
+    import errno as _errno
+    # Step 1: can we create an AF_ALG socket at all?
     try:
         s = socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)
+    except OSError as e:
+        if e.errno == _errno.ENOENT:
+            # af_alg module not loaded; try to load it and retry once
+            if os.system("modprobe af_alg 2>/dev/null") == 0:
+                try:
+                    s = socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)
+                except OSError as e2:
+                    return False, f"af_alg unavailable even after modprobe: {e2}"
+            else:
+                return False, "af_alg module not present (kernel built without CONFIG_CRYPTO_USER_API) — NOT vulnerable"
+        elif e.errno == _errno.EAFNOSUPPORT:
+            return False, "AF_ALG socket family not supported by kernel — NOT vulnerable"
+        else:
+            return False, f"socket(AF_ALG) failed unexpectedly: {e}"
+
+    # Step 2: can we bind authencesn specifically?
+    try:
         s.bind(("aead", "authencesn(hmac(sha256),cbc(aes))"))
         s.setsockopt(socket.SOL_ALG, socket.ALG_SET_KEY, AEAD_KEY)
         s.setsockopt(socket.SOL_ALG, socket.ALG_SET_AEAD_AUTHSIZE, None, AUTH_SIZE)
         s.close()
-        return True, "authencesn(hmac(sha256),cbc(aes)) available"
+        return True, "authencesn(hmac(sha256),cbc(aes)) available — VULNERABLE path reachable"
     except OSError as e:
+        s.close()
+        if e.errno in (_errno.ENOENT, _errno.ENOTSUP, _errno.EINVAL):
+            return False, f"authencesn transform not available (module blacklisted or not built): {e}"
         return False, f"AF_ALG bind failed: {e}"
 
 
